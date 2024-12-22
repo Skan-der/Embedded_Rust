@@ -1,0 +1,106 @@
+#![no_std]
+#![no_main]
+#![feature(abi_avr_interrupt)]
+
+use panic_halt as _;
+use avr_device::interrupt;
+
+mod atmega_328p_ports;
+use crate::atmega_328p_ports::*;
+
+const PB7: u8 = 7;
+const PB6: u8 = 6;
+
+#[avr_device::entry]
+fn main() -> ! {
+    config_timer();
+    config_uart0();
+
+    loop {
+        unsafe {
+            PORTB.write(PORTB.read() | (1 << PB7));
+        }
+        for _k in 0..10_000 {
+            avr_device::asm::nop();
+        }
+        unsafe {
+            PORTB.write(PORTB.read() & !(1 << PB7));
+        }
+        for _k in 0..10_000 {
+            avr_device::asm::nop();
+        }
+    }
+}
+
+fn config_timer() {
+    unsafe {
+        DDRB.write(0xFF); // PortB as OUTPUT
+        TCCR1A.write(0);  // Timer mode
+        TCCR1B.write(2);  // Prescaler
+        TIMSK1.write(1);  // OVF_Interruption
+        TCNT1.write(55535);
+        interrupt::enable(); // Enable global interrupts
+    }
+}
+
+fn config_uart0() {
+    unsafe {
+        UBRR0.write(51);  // Baud rate 9600
+        UCSR0C.write(6);  // 8 data bits, 1 stop bit
+        UCSR0B.write(0x18); // Enable TX and RX
+    }
+}
+
+// Function to send a string over UART
+fn send_uart(message: &str) {
+    for &byte in message.as_bytes() {
+        unsafe {
+            UDR0.write(byte); // Send each byte
+        }
+        for _k in 0..1000 {
+            avr_device::asm::nop(); // Small delay
+        }
+    }
+}
+
+// Interrupt handler
+#[interrupt(atmega328p)]
+fn TIMER1_OVF() {
+    let adc_value: u16 = 3890; // Simulate a 16-bit ADC value --> the range is [0..65535]
+    let mut buffer = [0u8; 6]; // Buffer to hold "3890\0"
+
+    // Convert the integer to a string representation
+    let value_str = int_to_str(adc_value, &mut buffer);
+
+    // Format and send the complete message
+    send_uart("the value is ");
+    send_uart(value_str);
+    send_uart("\r\n");
+
+    unsafe {
+        PORTB.write(PORTB.read() ^ (1 << PB6)); // Toggle PB6
+    }
+}
+
+// Function to convert an integer to a string
+fn int_to_str(mut value: u16, buffer: &mut [u8]) -> &str {
+    let mut index = buffer.len() - 1;
+
+    // Null-terminate the string
+    buffer[index] = 0;
+    index -= 1;
+
+    if value == 0 {
+        buffer[index] = b'0';
+        return core::str::from_utf8(&buffer[index..]).unwrap();
+    }
+
+    while value > 0 {
+        buffer[index] = b'0' + (value % 10) as u8;
+        value /= 10;
+        index -= 1;
+    }
+
+    core::str::from_utf8(&buffer[index + 1..]).unwrap()
+}
+

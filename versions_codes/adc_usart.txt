@@ -1,0 +1,147 @@
+#![no_std]
+#![no_main]
+#![feature(abi_avr_interrupt)] // Pour activer les fonctionnalités expérimentales
+
+use panic_halt as _;
+use avr_device::interrupt;
+
+use core::sync::atomic::{AtomicBool, Ordering};
+// Importation du module externe atmega_328p_port
+mod atmega_328p_ports;
+use crate::atmega_328p_ports::*; 
+
+// Constantes des broches
+const PB7: u8 = 7;
+const PB6: u8 = 6;
+const ADSC:u8 = 6 ;
+
+static SEM: AtomicBool = AtomicBool::new(false); // Semaphore for ADC data ready
+static mut ADC_RESULT: u16 = 0;    
+
+#[avr_device::entry]
+fn main() -> ! {
+    config_timer();
+    config_uart0();
+    config_adc();
+    
+    unsafe {
+        // Configurer PORTB comme sortie
+        DDRB.write(0xFF);
+        // Configurer le timer (Mode Normal)
+        TCCR1A.write(0);
+        TCCR1B.write(1); // Prescaler
+        TIMSK1.write(1); // Activer l'interruption de débordement du timer
+        PORTD.write(4);  // Activer PD2 (INT0)
+    }
+    
+    loop {
+        unsafe {
+            if SEM.load(Ordering::SeqCst) {
+            			SEM.store(false, Ordering::SeqCst); // Clear semaphore
+
+				//afficher la val analogique 
+				let mut adc7:u16 =  ((ADCH.read()as u16 ) << 8 ) | (ADCL.read()as u16 )   ;
+				//adc7 = (adc7 * 5000) >> 10;
+				//affiche(adc7);//print & uart 
+                let mut buffer = [0u8; 6]; // Buffer to hold "3890\0"
+
+    // Convert the integer to a string representation
+    let value_str = int_to_str(adc7, &mut buffer);
+
+    // Format and send the complete message
+    send_uart("the value is ");
+    send_uart(value_str);
+    send_uart("\r\n");
+               /* UDR0.write(66); // Envoyer le caractère 'B'
+                while (UCSR0A.read() & 0b01000000) == 0 {} // Attendre que le buffer soit vide
+                UDR0.write(10); // Envoyer un retour à la ligne (LF)
+                while (UCSR0A.read() & 0b01000000) == 0 {} // Attendre la transmission*/
+                
+                
+         SEM.store(true, Ordering::SeqCst); // Set the semaphore to indicate data is ready
+            }
+        }
+    }
+}
+
+// Configuration du timer 500ms à faire 
+fn config_timer() {
+    unsafe {
+        DDRB.write(0xFF); // Configurer PORTB en sortie
+        TCCR1A.write(0);  // Mode du timer (Normal)
+        TCCR1B.write(2);  // Prescaler à 8
+        TIMSK1.write(1);  // Activer l'interruption de débordement du timer
+        TCNT1.write(55535); // Initialiser le compteur
+        PORTD.write(4);   // Activer PD2 (INT0)
+        interrupt::enable(); // Activer les interruptions globales (SREG |= 0x80 en C)
+    }
+}
+
+// Configuration de l'UART
+fn config_uart0() {
+    unsafe {
+        UCSR0C.write(0b00000110); // Format de trame : 8 bits de données, 1 bit d'arrêt
+        UBRR0.write(51); // Baudrate de 9600 bps
+        UCSR0B.write(0x18); // Activer TX et RX
+    }
+}
+
+fn config_adc() {
+	unsafe {
+		ADMUX.write(0x47) ;
+		ADCSRA.write(0x88);
+	}	
+}
+
+// Function to send a string over UART
+fn send_uart(message: &str) {
+    for &byte in message.as_bytes() {
+        unsafe {
+            UDR0.write(byte); // Send each byte
+        }
+        for _k in 0..1000 {
+            avr_device::asm::nop(); // Small delay
+        }
+    }
+}
+
+// Function to convert an integer to a string
+fn int_to_str(mut value: u16, buffer: &mut [u8]) -> &str {
+    let mut index = buffer.len() - 1;
+
+    // Null-terminate the string
+    buffer[index] = 0;
+    index -= 1;
+
+    if value == 0 {
+        buffer[index] = b'0';
+        return core::str::from_utf8(&buffer[index..]).unwrap();
+    }
+
+    while value > 0 {
+        buffer[index] = b'0' + (value % 10) as u8;
+        value /= 10;
+        index -= 1;
+    }
+
+    core::str::from_utf8(&buffer[index + 1..]).unwrap()
+}
+
+
+
+// Gestionnaire d'interruption du timer
+#[interrupt(atmega328p)]
+fn TIMER1_OVF() {
+	
+    unsafe {
+        PORTB.write(PORTB.read() ^ (1 << PB7));
+        TCNT1.write(55535);           // Recharger la valeur initiale
+        ADCSRA.write(ADCSRA.read() | (1 << ADSC)); // Démarrer la conversion     
+          }
+} 
+#[interrupt(atmega328p)]
+fn ADC() {	
+  SEM.store(true, Ordering::SeqCst); // Activer l'envoi de données
+  	     }
+
+
